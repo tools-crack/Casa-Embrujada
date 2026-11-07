@@ -5,19 +5,33 @@ on:
 jobs:
   export-web:
     runs-on: ubuntu-22.04
-    container:
-      image: barichello/godot-ci:3.5.3
+    env:
+      V: 3.5.3
     steps:
       - uses: actions/checkout@v4
-      - name: Unzip project
-        run: unzip -o CasaEmbrujada_godot353.zip
-      - name: Setup templates
+      - name: Find and unzip project
         run: |
-          mkdir -v -p ~/.local/share/godot/templates
-          cp -r /root/.local/share/godot/templates/3.5.3.stable ~/.local/share/godot/templates/ || true
-      - name: Export
-        working-directory: CasaEmbrujada
+          ls -la
+          for z in *.zip; do unzip -o "$z" || true; done
+          P=$(dirname "$(find . -name project.godot | head -n 1)")
+          echo "PROJECT_DIR=$P" >> $GITHUB_ENV
+          echo "Project folder: $P"
+      - name: Install Godot and templates
         run: |
+          G=https://github.com/godotengine/godot/releases/download/${V}-stable
+          T=https://downloads.tuxfamily.org/godotengine/${V}
+          wget -q "$G/Godot_v${V}-stable_linux_headless.64.zip" || wget -q "$T/Godot_v${V}-stable_linux_headless.64.zip"
+          wget -q "$G/Godot_v${V}-stable_export_templates.tpz" || wget -q "$T/Godot_v${V}-stable_export_templates.tpz"
+          unzip -q Godot_v${V}-stable_linux_headless.64.zip
+          chmod +x Godot_v${V}-stable_linux_headless.64
+          sudo mv Godot_v${V}-stable_linux_headless.64 /usr/local/bin/godot
+          unzip -q Godot_v${V}-stable_export_templates.tpz
+          mkdir -p ~/.local/share/godot/templates/${V}.stable
+          mv templates/* ~/.local/share/godot/templates/${V}.stable/
+          godot --version
+      - name: Export HTML5
+        run: |
+          cd "$PROJECT_DIR"
           cat > export_presets.cfg <<'EOF'
           [preset.0]
 
@@ -28,8 +42,8 @@ jobs:
           export_filter="all_resources"
           include_filter=""
           exclude_filter=""
-          export_path="../build/web/index.html"
-          script_export_mode=1
+          export_path=""
+          script_export_mode=0
           script_encryption_key=""
 
           [preset.0.options]
@@ -46,10 +60,12 @@ jobs:
           html/focus_canvas_on_start=true
           html/experimental_virtual_keyboard=false
           EOF
-          godot -v --path . --editor --quit || true
-          mkdir -v -p ../build/web
-          godot -v --path . --export "HTML5" ../build/web/index.html
+          timeout 120 godot --path . --editor --quit || true
+          mkdir -p "$GITHUB_WORKSPACE/build/web"
+          godot --path . --export "HTML5" "$GITHUB_WORKSPACE/build/web/index.html"
+          ls -la "$GITHUB_WORKSPACE/build/web"
       - uses: actions/upload-artifact@v4
         with:
           name: casa-embrujada-web
           path: build/web
+          if-no-files-found: error
