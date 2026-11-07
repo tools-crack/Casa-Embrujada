@@ -1,0 +1,237 @@
+
+name: Export Web
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  export-web:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    env:
+      GODOT_VERSION: 3.5.3
+
+    steps:
+      # 1. Descargar el repositorio
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Buscar y descomprimir el proyecto
+      - name: Find and unzip project
+        shell: bash
+        run: |
+          set -e
+
+          shopt -s nullglob
+          for z in "$GITHUB_WORKSPACE"/*.zip; do
+            echo "Extracting: $z"
+            unzip -o "$z" -d "$GITHUB_WORKSPACE"
+          done
+
+          PROJECT_FILE=$(find "$GITHUB_WORKSPACE" \
+            -name project.godot \
+            -not -path '*/.git/*' \
+            -print -quit)
+
+          if [ -z "$PROJECT_FILE" ]; then
+            echo "ERROR: project.godot not found"
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$PROJECT_FILE")
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Project found: $PROJECT_DIR"
+          ls -la "$PROJECT_DIR"
+
+      # 3. Instalar Godot 3.5.3
+      - name: Install Godot 3.5.3
+        shell: bash
+        run: |
+          set -e
+
+          G="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable"
+
+          curl -fL --retry 3 \
+            "$G/Godot_v${GODOT_VERSION}-stable_linux_headless.64.zip" \
+            -o godot.zip
+
+          curl -fL --retry 3 \
+            "$G/Godot_v${GODOT_VERSION}-stable_export_templates.tpz" \
+            -o templates.tpz
+
+          unzip -q godot.zip
+
+          sudo install -m 755 \
+            "Godot_v${GODOT_VERSION}-stable_linux_headless.64" \
+            /usr/local/bin/godot
+
+          echo "Godot installation completed"
+
+          godot --version || true
+
+      # 4. Instalar las plantillas HTML5
+      - name: Install export templates
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p /tmp/godot-templates
+
+          unzip -q templates.tpz -d /tmp/godot-templates
+
+          TEMPLATE_SOURCE="/tmp/godot-templates/templates"
+
+          if [ ! -d "$TEMPLATE_SOURCE" ]; then
+            echo "ERROR: Templates folder not found"
+            find /tmp/godot-templates -maxdepth 3 -type f
+            exit 1
+          fi
+
+          TEMPLATE_DEST="$HOME/.local/share/godot/templates/${GODOT_VERSION}.stable"
+
+          mkdir -p "$TEMPLATE_DEST"
+
+          cp -a "$TEMPLATE_SOURCE/." "$TEMPLATE_DEST/"
+
+          echo "Installed templates:"
+          ls -la "$TEMPLATE_DEST"
+
+          if [ ! -f "$TEMPLATE_DEST/webassembly_release.zip" ]; then
+            echo "ERROR: HTML5 release template missing"
+            exit 1
+          fi
+
+      # 5. Configurar exportación HTML5
+      - name: Configure HTML5 export
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          cat > export_presets.cfg <<'EOF'
+          [preset.0]
+
+          name="HTML5"
+          platform="HTML5"
+          runnable=true
+          custom_features=""
+          export_filter="all_resources"
+          include_filter=""
+          exclude_filter=""
+          export_path=""
+          script_export_mode=0
+          script_encryption_key=""
+
+          [preset.0.options]
+
+          custom_template/debug=""
+          custom_template/release=""
+          variant/export_type=0
+          vram_texture_compression/for_desktop=true
+          vram_texture_compression/for_mobile=false
+          html/export_icon=true
+          html/custom_html_shell=""
+          html/head_include=""
+          html/canvas_resizing_policy=2
+          html/focus_canvas_on_start=true
+          html/experimental_virtual_keyboard=false
+          EOF
+
+          echo "HTML5 preset created"
+
+      # 6. Importar recursos del proyecto
+      - name: Import project resources
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+
+          set +e
+          timeout 180 godot \
+            --path "$PROJECT_DIR" \
+            --editor \
+            --quit \
+            > "$GITHUB_WORKSPACE/import.log" 2>&1
+
+          CODE=$?
+          set -e
+
+          cat "$GITHUB_WORKSPACE/import.log"
+
+          echo "Import process exit code: $CODE"
+
+      # 7. Exportar el juego
+      - name: Export HTML5
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p "$GITHUB_WORKSPACE/build/web"
+
+          cd "$PROJECT_DIR"
+
+          set +e
+          timeout 300 godot \
+            --path "$PROJECT_DIR" \
+            --export "HTML5" \
+            "$GITHUB_WORKSPACE/build/web/index.html" \
+            > "$GITHUB_WORKSPACE/export.log" 2>&1
+
+          CODE=$?
+          set -e
+
+          cat "$GITHUB_WORKSPACE/export.log"
+
+          echo "Export process exit code: $CODE"
+
+          # Comprobar que se generó el juego
+          if [ ! -s "$GITHUB_WORKSPACE/build/web/index.html" ]; then
+            echo "ERROR: index.html was not generated"
+            exit 1
+          fi
+
+          if ! find "$GITHUB_WORKSPACE/build/web" \
+            -maxdepth 1 -type f -name '*.wasm' | grep -q .; then
+            echo "ERROR: WebAssembly file missing"
+            exit 1
+          fi
+
+          if ! find "$GITHUB_WORKSPACE/build/web" \
+            -maxdepth 1 -type f -name '*.pck' | grep -q .; then
+            echo "ERROR: PCK file missing"
+            exit 1
+          fi
+
+          echo "HTML5 export verified successfully"
+
+          ls -lah "$GITHUB_WORKSPACE/build/web"
+
+      # 8. Subir el juego exportado
+      - name: Upload Web Build
+        uses: actions/upload-artifact@v4
+        with:
+          name: casa-embrujada-web
+          path: build/web/
+          if-no-files-found: error
+          retention-days: 30
+
+      # 9. Guardar registros si falla
+      - name: Upload error logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: godot-export-logs
+          path: |
+            import.log
+            export.log
+          if-no-files-found: ignore
+          
